@@ -32,6 +32,9 @@ from optparse import OptionParser
 import json
 from pathlib import Path
 
+# debug trace level, values are 0 (none), 1, and 2
+verbose = 0
+
 def getShortLE(d, a):
    return unpack('<H',(d)[a:a+2])[0]
 
@@ -51,6 +54,8 @@ oidValues = { b'2a864886f70d010c050103': '1.2.840.113549.1.12.5.1.3 pbeWithSha1A
               }
 
 def printASN1(d, l, rl):
+   if verbose==0:
+     return 0
    type = d[0]
    length = d[1]
    if length&0x80 > 0: #http://luca.ntop.org/Teaching/Appunti/asn1.html,
@@ -112,7 +117,7 @@ def readBsddb(name):
     sys.exit()
   pagesize = getLongBE(header,12)
   nkeys = getLongBE(header,0x38)
-  if options.verbose>1:
+  if verbose>1:
     print ('pagesize=0x%x' % pagesize)
     print ('nkeys=%d' % nkeys)
 
@@ -153,7 +158,7 @@ def readBsddb(name):
 
   for i in range( 0, len(db1), 2):
     db[ db1[i+1] ] = db1[ i ]
-  if options.verbose>1:
+  if verbose>1:
     for i in db:
       print ('%s: %s' % ( repr(i), hexlify(db[i]) ))
   return db
@@ -169,7 +174,7 @@ def decryptMoz3DES( globalSalt, masterPassword, entrySalt, encryptedData ):
   k = k1+k2
   iv = k[-8:]
   key = k[:24]
-  if options.verbose>0:
+  if verbose>0:
     print ('key= %s, iv=%s' % ( hexlify(key), hexlify(iv) ) )
   return DES3.new( key, DES3.MODE_CBC, iv).decrypt(encryptedData)
 
@@ -190,10 +195,10 @@ def decodeLoginData(data):
   ciphertext = asn1data[0][2].asOctets()
   return key_id, iv, ciphertext
 
-def getLoginData():
+def getLoginData(directory):
   logins = []
-  sqlite_file = options.directory / 'signons.sqlite'
-  json_file = options.directory / 'logins.json'
+  sqlite_file = directory / 'signons.sqlite'
+  json_file = directory / 'logins.json'
   if json_file.exists(): #since Firefox 32, json is used instead of sqlite3
     loginf = open( json_file, 'r').read()
     jsonLogins = json.loads(loginf)
@@ -213,7 +218,7 @@ def getLoginData():
     for row in c:
       encUsername = row[6]
       encPassword = row[7]
-      if options.verbose>1:
+      if verbose>1:
         print (row[1], encUsername, encPassword)
       logins.append( (decodeLoginData(encUsername), decodeLoginData(encPassword), row[1]) )
     return logins
@@ -229,7 +234,7 @@ def extractSecretKey(masterPassword, keyData): #3DES
   entrySalt = pwdCheck[3: 3+entrySaltLen]
   encryptedPasswd = pwdCheck[-16:]
   globalSalt = keyData[b'global-salt']
-  if options.verbose>1:
+  if verbose>1:
     print ('password-check=%s'% hexlify(pwdCheck))
     print ('entrySalt=%s' % hexlify(entrySalt))
     print ('globalSalt=%s' % hexlify(globalSalt))
@@ -264,7 +269,7 @@ def extractSecretKey(masterPassword, keyData): #3DES
   privKeyData = privKeyEntryASN1[0][1].asOctets()
   privKey = decryptMoz3DES( globalSalt, masterPassword, entrySalt, privKeyData )
   print ('decrypting privKeyData')
-  if options.verbose>0:
+  if verbose>0:
     print ('entrySalt=%s' % hexlify(entrySalt))
     print ('privKeyData=%s' % hexlify(privKeyData))
     print ('decrypted=%s' % hexlify(privKey))
@@ -299,7 +304,7 @@ def extractSecretKey(masterPassword, keyData): #3DES
   prKeyASN1 = decoder.decode( prKey )
   id = prKeyASN1[0][1]
   key = long_to_bytes( prKeyASN1[0][3] )
-  if options.verbose>0:
+  if verbose>0:
     print ('key=%s' % ( hexlify(key) ))
   return key
 
@@ -320,9 +325,11 @@ def decryptPBE(decodedItem, masterPassword, globalSalt):
     """
     entrySalt = decodedItem[0][0][1][0].asOctets()
     cipherT = decodedItem[0][1].asOctets()
-    print('entrySalt:',hexlify(entrySalt))
+    if verbose>0:
+      print('entrySalt:',hexlify(entrySalt))
     key = decryptMoz3DES( globalSalt, masterPassword, entrySalt, cipherT )
-    print(hexlify(key))
+    if verbose>0:
+      print(hexlify(key))
     return key[:24], pbeAlgo
   elif pbeAlgo == '1.2.840.113549.1.5.13': #pkcs5 pbes2
     #https://phabricator.services.mozilla.com/rNSSfc636973ad06392d11597620b602779b4af312f6
@@ -368,7 +375,8 @@ def decryptPBE(decodedItem, masterPassword, globalSalt):
     cipherT = decodedItem[0][1].asOctets()
     clearText = AES.new(key, AES.MODE_CBC, iv).decrypt(cipherT)
 
-    print('clearText', hexlify(clearText))
+    if verbose>0:
+      print('clearText', hexlify(clearText))
     return clearText, pbeAlgo
 
 def getKey( masterPassword, directory ):
@@ -379,13 +387,15 @@ def getKey( masterPassword, directory ):
     c.execute("SELECT item1,item2 FROM metadata WHERE id = 'password';")
     row = c.fetchone()
     globalSalt = row[0] #item1
-    print('globalSalt:',hexlify(globalSalt))
+    if verbose>0:
+      print('globalSalt:',hexlify(globalSalt))
     item2 = row[1]
     printASN1(item2, len(item2), 0)
     decodedItem2 = decoder.decode( item2 )
     clearText, algo = decryptPBE( decodedItem2, masterPassword, globalSalt )
 
-    print ('password check?', clearText==b'password-check\x02\x02')
+    if verbose>0:
+      print ('password check?', clearText==b'password-check\x02\x02')
     if clearText == b'password-check\x02\x02':
       c.execute("SELECT a11,a102 FROM nssPrivate;")
       for row in c:
@@ -411,30 +421,33 @@ def getKey( masterPassword, directory ):
     return None, None
 
 
-parser = OptionParser(usage="usage: %prog [options]")
-parser.add_option("-v", "--verbose", type="int", dest="verbose", help="verbose level", default=0)
-parser.add_option("-p", "--password", type="string", dest="masterPassword", help="masterPassword", default='')
-parser.add_option("-d", "--dir", type="string", dest="directory", help="directory", default='')
-(options, args) = parser.parse_args()
-options.directory = Path(options.directory)
+if __name__ == "__main__":
 
-key, algo = getKey(  options.masterPassword.encode(), options.directory )
-if key==None:
-  sys.exit()
-#print(hexlify(key))
-logins = getLoginData()
-if len(logins)==0:
-  print ('no stored passwords')
-else:
-  print ('decrypting login/password pairs' )
-if algo == '1.2.840.113549.1.12.5.1.3' or algo == '1.2.840.113549.1.5.13':
-  for i in logins:
-    assert i[0][0] == CKA_ID
-    print ('%20s:' % (i[2]),end='')  #site URL
-    iv = i[0][1]
-    ciphertext = i[0][2]
-    print ( unpad( DES3.new( key, DES3.MODE_CBC, iv).decrypt(ciphertext),8 ), end=',')
-    iv = i[1][1]
-    ciphertext = i[1][2]
-    print ( unpad( DES3.new( key, DES3.MODE_CBC, iv).decrypt(ciphertext),8 ) )
+  parser = OptionParser(usage="usage: %prog [options]")
+  parser.add_option("-v", "--verbose", type="int", dest="verbose", help="verbose level", default=0)
+  parser.add_option("-p", "--password", type="string", dest="masterPassword", help="masterPassword", default='')
+  parser.add_option("-d", "--dir", type="string", dest="directory", help="directory", default='')
+  (options, args) = parser.parse_args()
+  options.directory = Path(options.directory)
+  verbose = options.verbose
+
+  key, algo = getKey(  options.masterPassword.encode(), options.directory )
+  if key==None:
+    sys.exit()
+  #print(hexlify(key))
+  logins = getLoginData(options.directory)
+  if len(logins)==0:
+    print ('no stored passwords')
+  else:
+    print ('decrypting login/password pairs' )
+  if algo == '1.2.840.113549.1.12.5.1.3' or algo == '1.2.840.113549.1.5.13':
+    for i in logins:
+      assert i[0][0] == CKA_ID
+      print ('%20s:' % (i[2]),end='')  #site URL
+      iv = i[0][1]
+      ciphertext = i[0][2]
+      print ( unpad( DES3.new( key, DES3.MODE_CBC, iv).decrypt(ciphertext),8 ), end=',')
+      iv = i[1][1]
+      ciphertext = i[1][2]
+      print ( unpad( DES3.new( key, DES3.MODE_CBC, iv).decrypt(ciphertext),8 ) )
 
